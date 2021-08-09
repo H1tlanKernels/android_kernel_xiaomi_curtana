@@ -1456,7 +1456,7 @@ static int dwc3_probe(struct platform_device *pdev)
 		ret = dwc3_gadget_init(dwc);
 		if (ret) {
 			dev_err(dwc->dev, "gadget init failed %d\n", ret);
-			goto err3;
+			goto err2;
 		}
 	}
 
