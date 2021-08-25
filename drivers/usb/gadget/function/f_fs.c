@@ -3949,12 +3949,9 @@ static int ffs_acquire_dev(const char *dev_name, struct ffs_data *ffs_data)
 	}
 
 	ffs_dev_unlock();
-<<<<<<< HEAD
 
-	return ffs_dev;
-=======
 	return ret;
->>>>>>> ASB-2021-08-05_4.14-stable
+
 }
 
 static void ffs_release_dev(struct ffs_dev *ffs_dev)
