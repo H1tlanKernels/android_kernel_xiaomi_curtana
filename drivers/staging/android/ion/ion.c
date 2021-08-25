@@ -543,6 +543,7 @@ static void ion_dma_buf_release(struct dma_buf *dmabuf)
 static void *ion_dma_buf_vmap(struct dma_buf *dmabuf)
 {
 	struct ion_buffer *buffer = dmabuf->priv;
+
 	void *vaddr = ERR_PTR(-EINVAL);
 
 	if (buffer->heap->ops->map_kernel) {
@@ -579,17 +580,20 @@ static void *ion_dma_buf_kmap(struct dma_buf *dmabuf, unsigned long offset)
 	if (IS_ERR(vaddr))
 		return vaddr;
 
+
 	return vaddr + offset * PAGE_SIZE;
 }
 
 static void ion_dma_buf_kunmap(struct dma_buf *dmabuf, unsigned long offset,
 			       void *ptr)
 {
+
 	/*
 	 * TODO: Once clients remove their hacks where they assume kmap(ed)
 	 * addresses are virtually contiguous implement this properly
 	 */
 	ion_dma_buf_vunmap(dmabuf, ptr);
+
 }
 
 static int ion_sgl_sync_range(struct device *dev, struct scatterlist *sgl,
@@ -678,6 +682,7 @@ static int __ion_dma_buf_begin_cpu_access(struct dma_buf *dmabuf,
 	struct ion_buffer *buffer = dmabuf->priv;
 	struct ion_dma_buf_attachment *a;
 	int ret = 0;
+
 
 	if (!hlos_accessible_buffer(buffer)) {
 		trace_ion_begin_cpu_access_cmo_skip(NULL, dmabuf->buf_name,
@@ -893,6 +898,7 @@ static int ion_dma_buf_begin_cpu_access_partial(struct dma_buf *dmabuf,
 	struct ion_dma_buf_attachment *a;
 	int ret = 0;
 
+
 	if (!hlos_accessible_buffer(buffer)) {
 		trace_ion_begin_cpu_access_cmo_skip(NULL, dmabuf->buf_name,
 						    ion_buffer_cached(buffer),
@@ -990,6 +996,7 @@ static int ion_dma_buf_end_cpu_access_partial(struct dma_buf *dmabuf,
 						  false);
 		goto out;
 	}
+
 
 	mutex_lock(&buffer->lock);
 	if (IS_ENABLED(CONFIG_ION_FORCE_DMA_SYNC)) {
