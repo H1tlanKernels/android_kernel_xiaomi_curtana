@@ -105,10 +105,6 @@ out:
 static void dma_buf_release(struct dentry *dentry)
 {
 	struct dma_buf *dmabuf;
-<<<<<<< HEAD
-=======
-
->>>>>>> LA.UM.9.1.r1-10900-SMxxx0.0
 	dmabuf = dentry->d_fsdata;
 
 	spin_lock(&dentry->d_lock);
