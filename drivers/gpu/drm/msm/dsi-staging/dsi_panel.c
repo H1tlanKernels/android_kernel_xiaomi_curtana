@@ -5399,6 +5399,7 @@ int dsi_panel_disable(struct dsi_panel *panel)
 			rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_OFF);
 		}
 
+		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_OFF);
 		if (rc) {
 			/*
 			 * Sending panel off commands may fail when  DSI
