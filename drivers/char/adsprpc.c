@@ -236,6 +236,7 @@ struct smq_invoke_ctx {
 	uint32_t *crc;
 	unsigned int magic;
 	uint64_t ctxid;
+	bool pm_awake_voted;
 };
 
 struct fastrpc_ctx_lst {
@@ -337,6 +338,7 @@ struct fastrpc_mmap {
 	int uncached;
 	int secure;
 	uintptr_t attr;
+	bool is_filemap; /*flag to indicate map used in process init*/
 };
 
 enum fastrpc_perfkeys {
@@ -392,6 +394,7 @@ struct fastrpc_file {
 	struct mutex perf_mutex;
 	struct pm_qos_request pm_qos_req;
 	int qos_request;
+	struct mutex pm_qos_mutex;
 	struct mutex map_mutex;
 	struct mutex internal_map_mutex;
 	/* Identifies the device (MINOR_NUM_DEV / MINOR_NUM_SECURE_DEV) */
@@ -702,9 +705,10 @@ static int fastrpc_mmap_remove(struct fastrpc_file *fl, uintptr_t va,
 
 	spin_lock(&me->hlock);
 	hlist_for_each_entry_safe(map, n, &me->maps, hn) {
-		if (map->raddr == va &&
+		if (map->refs == 1 && map->raddr == va &&
 			map->raddr + map->len == va + len &&
-			map->refs == 1) {
+			/*Remove map if not used in process initialization*/
+			!map->is_filemap) {
 			match = map;
 			hlist_del_init(&map->hn);
 			break;
@@ -716,9 +720,10 @@ static int fastrpc_mmap_remove(struct fastrpc_file *fl, uintptr_t va,
 		return 0;
 	}
 	hlist_for_each_entry_safe(map, n, &fl->maps, hn) {
-		if (map->raddr == va &&
+		if (map->refs == 1 && map->raddr == va &&
 			map->raddr + map->len == va + len &&
-			map->refs == 1) {
+			/*Remove map if not used in process initialization*/
+			!map->is_filemap) {
 			match = map;
 			hlist_del_init(&map->hn);
 			break;
@@ -852,6 +857,7 @@ static int fastrpc_mmap_create(struct fastrpc_file *fl, int fd,
 	map->fl = fl;
 	map->fd = fd;
 	map->attr = attr;
+	map->is_filemap = false;
 	if (mflags == ADSP_MMAP_HEAP_ADDR ||
 				mflags == ADSP_MMAP_REMOTE_HEAP_ADDR) {
 		map->apps = me;
@@ -1277,6 +1283,7 @@ static int context_alloc(struct fastrpc_file *fl, uint32_t kernel,
 	ctx->tgid = fl->tgid;
 	init_completion(&ctx->work);
 	ctx->magic = FASTRPC_CTX_MAGIC;
+	ctx->pm_awake_voted = false;
 
 	spin_lock(&fl->hlock);
 	hlist_add_head(&ctx->hn, &clst->pending);
@@ -1963,6 +1970,7 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 	int err = 0, cid = -1, interrupted = 0;
 	struct timespec64 invoket = {0};
 	int64_t *perf_counter = NULL;
+	bool pm_awake_voted;
 
 	cid = fl->cid;
 	VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
@@ -1976,7 +1984,10 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 		goto bail;
 	}
 	perf_counter = getperfcounter(fl, PERF_COUNT);
-
+	pm_awake_voted = false;
+	if (interrupted != -ERESTARTSYS)
+		fastrpc_pm_awake(fl->wake_enable, &pm_awake_voted,
+			gcinfo[cid].secure);
 	if (fl->profile)
 		ktime_get_real_ts64(&invoket);
 
@@ -2026,6 +2037,7 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 	if (err)
 		goto bail;
  wait:
+	fastrpc_pm_relax(&pm_awake_voted, gcinfo[cid].secure);
 	if (kernel)
 		wait_for_completion(&ctx->work);
 	else
@@ -2040,16 +2052,17 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 		inv_args(ctx);
 	PERF_END);
 
-	VERIFY(err, 0 == (err = ctx->retval));
-	if (err)
-		goto bail;
-
 	PERF(fl->profile, GET_COUNTER(perf_counter, PERF_PUTARGS),
 	VERIFY(err, 0 == put_args(kernel, ctx, invoke->pra));
 	PERF_END);
 	if (err)
 		goto bail;
- bail:
+
+	VERIFY(err, 0 == (err = ctx->retval));
+	if (err)
+		goto bail;
+
+bail:
 	if (ctx && interrupted == -ERESTARTSYS)
 		context_save_interrupted(ctx);
 	else if (ctx)
@@ -2071,6 +2084,7 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 				*count = *count+1;
 		}
 	}
+	fastrpc_pm_relax(&pm_awake_voted, gcinfo[cid].secure);
 	return err;
 }
 
@@ -2163,6 +2177,8 @@ static int fastrpc_init_process(struct fastrpc_file *fl,
 			mutex_lock(&fl->map_mutex);
 			VERIFY(err, !fastrpc_mmap_create(fl, init->filefd, 0,
 				init->file, init->filelen, mflags, &file));
+			if (file)
+				file->is_filemap = true;
 			mutex_unlock(&fl->map_mutex);
 			if (err)
 				goto bail;
@@ -3076,6 +3092,7 @@ static int fastrpc_file_free(struct fastrpc_file *fl)
 	mutex_destroy(&fl->perf_mutex);
 	mutex_destroy(&fl->map_mutex);
 	mutex_destroy(&fl->internal_map_mutex);
+	mutex_destroy(&fl->pm_qos_mutex);
 	kfree(fl);
 	return 0;
 }
@@ -3443,6 +3460,7 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 	hlist_add_head(&fl->hn, &me->drivers);
 	spin_unlock(&me->hlock);
 	mutex_init(&fl->perf_mutex);
+	mutex_init(&fl->pm_qos_mutex);
 	return 0;
 }
 
@@ -3450,11 +3468,15 @@ static int fastrpc_set_process_info(struct fastrpc_file *fl)
 {
 	int err = 0, buf_size = 0;
 	char strpid[PID_SIZE];
+	char cur_comm[TASK_COMM_LEN];
+
+	memcpy(cur_comm, current->comm, TASK_COMM_LEN);
+	cur_comm[TASK_COMM_LEN-1] = '\0';
 
 	fl->tgid = current->tgid;
 	snprintf(strpid, PID_SIZE, "%d", current->pid);
 	if (debugfs_root) {
-		buf_size = strlen(current->comm) + strlen("_")
+		buf_size = strlen(cur_comm) + strlen("_")
 			+ strlen(strpid) + 1;
 		spin_lock(&fl->hlock);
 		if (fl->debug_buf_alloced_attempted) {
@@ -3468,13 +3490,13 @@ static int fastrpc_set_process_info(struct fastrpc_file *fl)
 			err = -ENOMEM;
 			return err;
 		}
-		snprintf(fl->debug_buf, UL_SIZE, "%.10s%s%d",
-			current->comm, "_", current->pid);
+		snprintf(fl->debug_buf, buf_size, "%.10s%s%d",
+			cur_comm, "_", current->pid);
 		fl->debugfs_file = debugfs_create_file(fl->debug_buf, 0644,
 			debugfs_root, fl, &debugfs_fops);
 		if (IS_ERR_OR_NULL(fl->debugfs_file)) {
 			pr_warn("Error: %s: %s: failed to create debugfs file %s\n",
-				current->comm, __func__, fl->debug_buf);
+				cur_comm, __func__, fl->debug_buf);
 			fl->debugfs_file = NULL;
 			kfree(fl->debug_buf);
 			fl->debug_buf = NULL;
@@ -3552,12 +3574,14 @@ static int fastrpc_internal_control(struct fastrpc_file *fl,
 		VERIFY(err, latency != 0);
 		if (err)
 			goto bail;
+		mutex_lock(&fl->pm_qos_mutex);
 		if (!fl->qos_request) {
 			pm_qos_add_request(&fl->pm_qos_req,
 				PM_QOS_CPU_DMA_LATENCY, latency);
 			fl->qos_request = 1;
 		} else
 			pm_qos_update_request(&fl->pm_qos_req, latency);
+		mutex_unlock(&fl->pm_qos_mutex);
 		break;
 	case FASTRPC_CONTROL_KALLOC:
 		cp->kalloc.kalloc_support = 1;
@@ -4641,6 +4665,10 @@ static void __exit fastrpc_device_exit(void)
 	unregister_chrdev_region(me->dev_no, NUM_CHANNELS);
 	if (me->rpmsg_register == 1)
 		unregister_rpmsg_driver(&fastrpc_rpmsg_client);
+	if (me->wake_source)
+		wakeup_source_unregister(me->wake_source);
+	if (me->wake_source_secure)
+		wakeup_source_unregister(me->wake_source_secure);
 	debugfs_remove_recursive(debugfs_root);
 }
 
