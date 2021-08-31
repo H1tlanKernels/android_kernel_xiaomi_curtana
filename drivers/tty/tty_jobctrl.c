@@ -501,8 +501,10 @@ static int tiocspgrp(struct tty_struct *tty, struct tty_struct *real_tty, pid_t 
 	if (session_of_pgrp(pgrp) != task_session(current))
 		goto out_unlock;
 	retval = 0;
+
 	put_pid(real_tty->pgrp);
 	real_tty->pgrp = get_pid(pgrp);
+
 out_unlock:
 	rcu_read_unlock();
 out_unlock_ctrl:
@@ -518,6 +520,7 @@ out_unlock_ctrl:
  *
  *	Obtain the session id of the tty. If there is no session
  *	return an error.
+
  */
 static int tiocgsid(struct tty_struct *tty, struct tty_struct *real_tty, pid_t __user *p)
 {
